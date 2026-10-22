@@ -1,0 +1,88 @@
+name: Build iPhone IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Download source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Prepare iPhone-only project
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+
+          path = Path("project.yml")
+          text = path.read_text()
+
+          marker = "  # ── iPhone 앱 테스트"
+          if marker not in text:
+              raise RuntimeError("Project structure changed; check project.yml.")
+
+          text = text.split(marker, 1)[0]
+
+          start = text.find("    dependencies:\n")
+          end = text.find("    entitlements:\n", start)
+
+          if start < 0 or end < 0:
+              raise RuntimeError("Cannot locate Watch and Widget dependencies.")
+
+          text = text[:start] + text[end:]
+          path.write_text(text)
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project BydAutoLock.xcodeproj \
+            -scheme BydAutoLock \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package IPA
+        run: |
+          set -eu
+          APP="build/Build/Products/Release-iphoneos/BYDAutoLock.app"
+          test -d "$APP"
+          mkdir -p package/Payload
+          cp -R "$APP" package/Payload/
+          cd package
+          zip -qry ../BYDAutoLock-unsigned.ipa Payload
+
+      - name: Save IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BYDAutoLock-iPhone-unsigned
+          path: BYDAutoLock-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
